@@ -1,0 +1,18 @@
+# 인증 정보
+credentials.json
+token.json
+
+# 출력 파일
+output/
+
+# 프리뷰 이미지
+preview/
+preview_d/
+preview_d2/
+preview_d3/
+preview_final/
+
+# Python
+__pycache__/
+*.pyc
+.env
