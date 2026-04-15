@@ -26,6 +26,24 @@ shorts-highlight/
 └── preview_final/        # 최종 버전
 ```
 
+## 설치
+
+### 사전 준비
+- Python 3.10+
+- [FFmpeg](https://ffmpeg.org/) (PATH 등록 필요)
+- Git
+
+### 클론 & 설치
+```bash
+git clone https://github.com/iamkenny12-lab/shorts-highlight.git
+cd shorts-highlight
+pip install -r requirements.txt
+```
+
+### YouTube 업로드 사용 시
+`credentials.json` (Google OAuth2 클라이언트) 파일을 프로젝트 루트에 직접 배치해야 합니다.
+이 파일은 보안상 저장소에 포함되어 있지 않으므로, [Google Cloud Console](https://console.cloud.google.com/)에서 직접 발급받아야 합니다.
+
 ## 사용법
 
 ```bash
