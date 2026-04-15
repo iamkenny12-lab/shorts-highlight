@@ -186,7 +186,7 @@ def generate_shorts(video_path, start_sec, duration, info):
     output_name = f"shorts_{date_str.replace('/', '')}_{away}vs{home}.mp4" if away else "shorts_output.mp4"
     output_path = os.path.join(OUTPUT_DIR, output_name)
 
-    font_bold = "C\\\\:/Windows/Fonts/malgunbd.ttf"
+    font_bold = os.path.join(BASE_DIR, "fonts", "Pretendard-Bold.otf").replace("\\", "/").replace(":", "\\\\:")
 
     # ffmpeg 명령을 .sh 파일로 작성하여 실행 (인코딩/이스케이프 문제 회피)
     script_path = os.path.join(OUTPUT_DIR, "run_ffmpeg.sh")
