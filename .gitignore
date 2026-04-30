@@ -1,6 +1,10 @@
 # 인증 정보
 credentials.json
 token.json
+token_fullscope.json
+
+# Claude Code 로컬 설정
+.claude/
 
 # 출력 파일
 output/

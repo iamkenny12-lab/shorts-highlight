@@ -18,7 +18,7 @@ import tempfile
 from datetime import datetime
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
@@ -39,9 +39,12 @@ def download_video(url):
     duration = meta.get("duration", 0)
 
     video_path = os.path.join(OUTPUT_DIR, "source.mp4")
+    if os.path.exists(video_path):
+        os.remove(video_path)
     subprocess.run(
-        [sys.executable, "-m", "yt_dlp", "-f", "best[height<=720]",
-         "-o", video_path, "--no-warnings", url],
+        [sys.executable, "-m", "yt_dlp",
+         "-f", "best[ext=mp4][protocol=https]/18/best[height<=720]",
+         "-o", video_path, "--no-warnings", "--force-overwrites", url],
         capture_output=True,
     )
     print(f"  제목: {title}")
@@ -169,40 +172,194 @@ def escape_ffmpeg_text(text):
     return text
 
 
-def generate_shorts(video_path, start_sec, duration, info):
+# ──────────────────────────────────────────────
+# 텍스트 오버레이 (PIL)
+# ──────────────────────────────────────────────
+
+NAMED_COLORS = {
+    "white": (255, 255, 255),
+    "yellow": (255, 230, 0),
+    "orange": (255, 120, 0),
+    "red": (255, 60, 60),
+    "green": (60, 220, 120),
+    "blue": (80, 160, 255),
+}
+
+
+def parse_highlights(spec):
+    """'단어:yellow,단어2:orange' 형식을 dict로 파싱."""
+    result = {}
+    if not spec:
+        return result
+    for item in spec.split(","):
+        if ":" not in item:
+            continue
+        word, color = item.split(":", 1)
+        word = word.strip()
+        color = color.strip().lower()
+        if word and color in NAMED_COLORS:
+            result[word] = NAMED_COLORS[color]
+    return result
+
+
+def split_by_highlight(text, highlights, default_color):
+    """텍스트를 (단어, 색상) 토큰으로 분리. 긴 키워드 우선."""
+    keywords = sorted(highlights.keys(), key=len, reverse=True)
+    tokens = [(text, None)]
+    for kw in keywords:
+        new_tokens = []
+        for seg, color in tokens:
+            if color is not None:
+                new_tokens.append((seg, color))
+                continue
+            parts = seg.split(kw)
+            for i, part in enumerate(parts):
+                if part:
+                    new_tokens.append((part, None))
+                if i < len(parts) - 1:
+                    new_tokens.append((kw, highlights[kw]))
+        tokens = new_tokens
+    return [(t, c if c is not None else default_color) for t, c in tokens]
+
+
+def _draw_centered_line(draw, line, font, y, canvas_w, highlights, default_color, stroke_w=6):
+    tokens = split_by_highlight(line, highlights, default_color)
+    widths = [draw.textlength(t, font=font) for t, _ in tokens]
+    total_w = sum(widths)
+    x = (canvas_w - total_w) / 2
+    for (text, color), w in zip(tokens, widths):
+        draw.text((x, y), text, font=font, fill=color, stroke_width=stroke_w, stroke_fill=(0, 0, 0))
+        x += w
+
+
+def build_text_overlay(top_lines, bottom_text, highlights, font_path,
+                       canvas_w=1080, canvas_h=1920, main_h=960,
+                       top_font_sizes=(140, 100), bottom_font_size=64,
+                       bottom_padding_top=40, default_color=(255, 255, 255),
+                       top_valign="center", bottom_valign="top",
+                       top_padding=20, bottom_padding=40):
+    """투명 PNG 텍스트 오버레이 이미지를 생성하고 경로를 반환한다."""
+    main_top = (canvas_h - main_h) // 2  # 위쪽 검은 영역 높이
+    main_bottom = main_top + main_h
+
+    img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    # 위쪽 텍스트: 줄별 폰트 크기, 세로 가운데 정렬
+    if top_lines:
+        sizes = list(top_font_sizes)
+        # 줄 수에 맞게 사이즈 길이 조정
+        while len(sizes) < len(top_lines):
+            sizes.append(sizes[-1])
+        sizes = sizes[:len(top_lines)]
+        fonts = [ImageFont.truetype(font_path, s) for s in sizes]
+        line_heights = [s + 20 for s in sizes]
+        total_h = sum(line_heights)
+        if top_valign == "top":
+            start_y = top_padding
+        elif top_valign == "bottom":
+            start_y = main_top - total_h - top_padding
+        else:
+            start_y = (main_top - total_h) / 2
+        y_cursor = start_y
+        for line, font, lh in zip(top_lines, fonts, line_heights):
+            _draw_centered_line(draw, line, font, y_cursor, canvas_w, highlights, default_color)
+            y_cursor += lh
+
+    # 아래쪽 텍스트
+    if bottom_text:
+        font = ImageFont.truetype(font_path, bottom_font_size)
+        line_h = bottom_font_size + 20
+        bottom_area_h = canvas_h - main_bottom
+        if bottom_valign == "top":
+            by = main_bottom + bottom_padding_top
+        elif bottom_valign == "bottom":
+            by = canvas_h - line_h - bottom_padding
+        else:
+            by = main_bottom + (bottom_area_h - line_h) / 2
+        _draw_centered_line(
+            draw, bottom_text, font, by,
+            canvas_w, highlights, default_color, stroke_w=4
+        )
+
+    out_path = os.path.join(OUTPUT_DIR, "text_overlay.png")
+    img.save(out_path)
+    return out_path
+
+
+def generate_shorts(video_path, start_sec, duration, info,
+                    top_text_override=None, bottom_text_override=None,
+                    bg_style="black", output_name=None,
+                    highlights=None, top_font_sizes=(140, 100),
+                    bottom_font_size=64, bottom_padding_top=40,
+                    default_color=(255, 255, 255),
+                    top_valign="center", bottom_valign="top",
+                    top_padding=20, bottom_padding=40):
     """세로형 쇼츠 영상을 생성한다."""
     print("[3/4] 쇼츠 생성 중...")
 
     date_str = info.get("date", "")
     away = info.get("away", "")
     home = info.get("home", "")
-    top_text = escape_ffmpeg_text(f"{away} vs {home} 하이라이트" if away and home else "KBO 하이라이트")
-    bottom_text = escape_ffmpeg_text(f"{away} vs {home}" if away and home else "")
-    date_str = escape_ffmpeg_text(date_str)
+
+    # 상단 텍스트: override > 자동 파싱
+    if top_text_override is not None:
+        top_lines = top_text_override.split("\\n")
+    else:
+        default = f"{away} vs {home} 하이라이트" if away and home else "KBO 하이라이트"
+        top_lines = [default]
+
+    # 하단 텍스트: override > 자동 파싱
+    if bottom_text_override is not None:
+        bottom_text = bottom_text_override
+    else:
+        bottom_text = f"{away} vs {home}" if away and home else ""
 
     m, s = divmod(start_sec, 60)
     start_ts = f"00:{m:02d}:{s:02d}"
 
-    output_name = f"shorts_{date_str.replace('/', '')}_{away}vs{home}.mp4" if away else "shorts_output.mp4"
+    if not output_name:
+        output_name = f"shorts_{date_str.replace('/', '')}_{away}vs{home}.mp4" if away else "shorts_output.mp4"
     output_path = os.path.join(OUTPUT_DIR, output_name)
 
-    font_bold = os.path.join(BASE_DIR, "fonts", "Pretendard-Bold.otf").replace("\\", "/").replace(":", "\\\\:")
+    # 텍스트 오버레이 PNG 생성 (PIL)
+    font_path = os.path.join(BASE_DIR, "fonts", "Pretendard-Bold.otf")
+    overlay_png = build_text_overlay(
+        top_lines=top_lines,
+        bottom_text=bottom_text,
+        highlights=highlights or {},
+        font_path=font_path,
+        top_font_sizes=top_font_sizes,
+        bottom_font_size=bottom_font_size,
+        bottom_padding_top=bottom_padding_top,
+        default_color=default_color,
+        top_valign=top_valign,
+        bottom_valign=bottom_valign,
+        top_padding=top_padding,
+        bottom_padding=bottom_padding,
+    )
 
-    # ffmpeg 명령을 .sh 파일로 작성하여 실행 (인코딩/이스케이프 문제 회피)
+    # 배경 스타일
+    if bg_style == "black":
+        base_filter = "[0:v]scale=-2:960,crop=1080:960:(iw-1080)/2:0,pad=1080:1920:0:(1920-960)/2:black[base]"
+    else:
+        base_filter = (
+            "[0:v]crop=ih*9/16:ih,scale=1080:1920,gblur=sigma=30[bg];"
+            "[0:v]scale=-2:960,crop=1080:960:(iw-1080)/2:0[main];"
+            "[bg][main]overlay=0:(H-h)/2[base]"
+        )
+
     script_path = os.path.join(OUTPUT_DIR, "run_ffmpeg.sh")
     script = (
         f'#!/bin/bash\n'
-        f'ffmpeg -i "{video_path}" -ss {start_ts} -t {duration} \\\n'
+        f'ffmpeg -ss {start_ts} -t {duration} -i "{video_path}" \\\n'
+        f'  -i "{overlay_png}" \\\n'
         f'  -filter_complex "\n'
-        f'    [0:v]crop=ih*9/16:ih,scale=1080:1920,gblur=sigma=30[bg];\n'
-        f'    [0:v]scale=-2:960,crop=1080:960:(iw-1080)/2:0[main];\n'
-        f"    [bg][main]overlay=0:(H-h)/2,\n"
-        f"    drawtext=text='{date_str}':fontfile='{font_bold}':fontsize=100:fontcolor=yellow:borderw=4:bordercolor=black:x=(w-text_w)/2:y=60,\n"
-        f"    drawtext=text='{top_text}':fontfile='{font_bold}':fontsize=108:fontcolor=yellow:borderw=4:bordercolor=black:x=(w-text_w)/2:y=175,\n"
-        f"    drawtext=text='{bottom_text}':fontfile='{font_bold}':fontsize=80:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=1750[outv]\n"
+        f"    {base_filter};\n"
+        f"    [base][1:v]overlay=0:0[outv]\n"
         f'  " \\\n'
-        f'  -map "[outv]" -map 0:a -c:v libx264 -preset fast -crf 18 \\\n'
-        f'  -c:a aac -b:a 128k -shortest "{output_path}" -y\n'
+        f'  -map "[outv]" -map 0:a? -c:v libx264 -preset fast -crf 18 \\\n'
+        f'  -c:a aac -b:a 128k "{output_path}" -y\n'
     )
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(script)
@@ -261,6 +418,24 @@ def main():
     parser.add_argument("--public", action="store_true", help="공개로 업로드 (기본: 비공개)")
     parser.add_argument("--start", type=str, default=None, help="시작 시간 (예: 5:30)")
     parser.add_argument("--duration", type=int, default=20, help="클립 길이 (초, 기본: 20)")
+    parser.add_argument("--top-text", type=str, default=None, help="상단 자막 (\\n으로 줄바꿈)")
+    parser.add_argument("--bottom-text", type=str, default=None, help="하단 자막 (예: 출처 : XXX)")
+    parser.add_argument("--bg", type=str, default="black", choices=["black", "blur"], help="배경 스타일")
+    parser.add_argument("--output", type=str, default=None, help="출력 파일명")
+    parser.add_argument("--highlight", type=str, default=None,
+                        help="단어 색상 강조 (예: '장원삼:yellow,류현진:orange')")
+    parser.add_argument("--top-font-sizes", type=str, default="140,100",
+                        help="상단 줄별 폰트 크기 (콤마 구분)")
+    parser.add_argument("--bottom-font-size", type=int, default=64,
+                        help="하단 자막 폰트 크기")
+    parser.add_argument("--bottom-padding-top", type=int, default=40,
+                        help="하단 자막의 메인 영상 아래 여백")
+    parser.add_argument("--default-color", type=str, default="white",
+                        help="기본 텍스트 색상 (white/yellow/orange/red/green/blue)")
+    parser.add_argument("--top-valign", default="center", choices=["top", "center", "bottom"],
+                        help="상단 텍스트 세로 정렬")
+    parser.add_argument("--bottom-valign", default="top", choices=["top", "center", "bottom"],
+                        help="하단 텍스트 세로 정렬")
 
     args = parser.parse_args()
 
@@ -280,7 +455,21 @@ def main():
         start_sec, clip_duration = detect_highlight(video_path, args.duration)
 
     # 3단계: 쇼츠 생성
-    output_path = generate_shorts(video_path, start_sec, clip_duration, info)
+    top_sizes = tuple(int(x) for x in args.top_font_sizes.split(",") if x.strip())
+    output_path = generate_shorts(
+        video_path, start_sec, clip_duration, info,
+        top_text_override=args.top_text,
+        bottom_text_override=args.bottom_text,
+        bg_style=args.bg,
+        output_name=args.output,
+        highlights=parse_highlights(args.highlight),
+        top_font_sizes=top_sizes,
+        bottom_font_size=args.bottom_font_size,
+        bottom_padding_top=args.bottom_padding_top,
+        default_color=NAMED_COLORS.get(args.default_color.lower(), (255, 255, 255)),
+        top_valign=args.top_valign,
+        bottom_valign=args.bottom_valign,
+    )
     if not output_path:
         print("쇼츠 생성 실패!")
         return
